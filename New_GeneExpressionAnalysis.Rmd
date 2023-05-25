@@ -1,0 +1,262 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+#load libraries
+
+library(DESeq2)
+library(pheatmap)
+library(dplyr)
+library(RColorBrewer)
+library(ggplot2)
+library(ggrepel)
+library(readxl)
+library(org.Mm.eg.db)
+library(clusterProfiler)
+library(apeglm)
+library(pcaExplorer)
+library(RNAseqQC)
+library(vsn)
+library(EnhancedVolcano)
+```
+Loading the necessary libaries for my analysis 
+```{r}
+#set the working directory 
+setwd("/Users/ganiyuopeyemi/Desktop/PhD Presentation Folder")
+```
+
+
+```{r}
+#Load the count data
+count_data <- read.table('GeneExpression.txt',header=TRUE)
+colnames(count_data)
+head(count_data)
+dim(count_data)
+```
+
+
+```{r}
+
+#Load the sample information 
+sample_info  <- read_excel('sample.xlsx')
+colnames(sample_info)
+head(sample_info)
+```
+```{r}
+# making sure the row names in sample_info matches to column names in counts_data
+all(colnames(count_data) %in% rownames(sample_info))
+```
+```{r}
+#Creating a function to set geneid as rownames
+set_countdata <- function(df_1){
+  rownames(df_1) <- df_1[,1]
+  df_1 <- df_1[,-1]
+  
+}
+
+#Using the new created function on the count_data 
+count_data<- set_countdata(count_data)
+head(count_data)
+```
+```{r}
+
+## checking again if the row names in sample_info matches to column names in counts_data
+all(colnames(count_data) == sample_info$Sample)
+```
+```{r}
+#Set factor levels
+sample_info$Treatment <- factor(sample_info$Treatment)
+```
+
+```{r}
+#Mapping the gene id to gene symbols
+count_data$Symbols <-mapIds(org.Mm.eg.db,keys=rownames(count_data),
+          column="SYMBOL", keytype="ENTREZID", multiVals="first")
+
+```
+```{r}
+head(count_data)
+```
+```{r}
+#set the gene symbol as rownames 
+rownames(count_data) <- make.names(count_data[,"Symbols"], unique = TRUE)
+
+```
+
+```{r}
+#removing the colname Symbol
+count_data$Symbols <- NULL
+
+head(count_data)
+```
+```{r}
+#Create a deseq object using the count data and sample information
+dds <- DESeqDataSetFromMatrix(countData = count_data, colData = sample_info, design = ~Treatment)
+
+```
+
+```{r}
+dds
+```
+Quality Control on raw count matrix
+```{r}
+#Plot the distribution of the total number of counts per sample as histogram.
+plot_total_counts(dds)
+```
+I am looking at the total number of counts for each sample(library size) in the plot above,all the samples have total counts within the same order of magnitude.
+```{r}
+#Plot per sample the fraction of genes, versus the fraction of total counts.
+plot_library_complexity(dds)
+```
+This plot shows what fraction of counts is taken up by what fraction of genes. Samples showing a different library complexity than the rest might be considered low quality. In our case, all samples have very similar complexity.
+```{r}
+#Plot number of detected genes for each sample
+plot_gene_detection(dds)
+```
+In this plot, the number of detected genes is shown for each sample based on the thresholds for which the number of genes with counts greater or equal
+than the thresholds is plotted
+```{r}
+#Filter the genes
+keep <- rowSums(counts(dds)) >= 5
+dds <- dds[keep,]
+```
+
+
+```{r}
+vsd <- vst(dds)
+mean_sd_plot(vsd)
+```
+For each gene the rank of the mean count versus the standard deviation. In the resulting plot, the red trend line should be relatively flat with respect to the scale on the y-axis, which is shown in the plot above
+```{r}
+#Set the reference for the Treatment factor
+dds$Treatment <- factor(dds$Treatment, levels=c("untreated","treated"))
+```
+
+```{r}
+#Perform the statistical test to identify differentially expressed genes
+dds <- DESeq(dds)
+deseq_result <- results(dds)
+
+#Explore results
+summary(deseq_result)
+```
+
+```{r}
+#Change the DESeq Object to R object (dataframe)
+deseq_result <- as.data.frame(deseq_result)
+```
+
+```{r}
+#Order the result table by increasing p value
+deseq_result_ordered <- deseq_result[order(deseq_result$pvalue),]
+head(deseq_result_ordered)
+
+```
+
+```{r}
+#Save the normalized counts
+normalize_counts <- counts(dds, normalized = TRUE)
+head(normalize_counts)
+write.csv(normalize_counts, 'normalized_counts.csv')
+```
+
+```{r}
+#Visualization
+
+#Dispersion Plot
+
+plotDispEsts(dds)
+```
+```{r}
+#PCA plots
+#use tranformed values to generate the pca plot
+plotPCA(vsd,intgroup=c("Treatment"),returnData=FALSE)
+```
+```{r}
+pcaplot(vsd,intgroup = c("Treatment"))
+```
+```{r}
+#Heatmaps
+
+#Heatmap of sample to sample distance matrix (with clustering) based on the normalized counts
+sampleDists <-  dist(t(assay(vsd)))
+sampleDistMatrix <- as.matrix(sampleDists)
+colnames(sampleDistMatrix)
+
+#set a color scheme 
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+
+#generate the heatmap
+pheatmap(sampleDistMatrix, clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists, col=colors)
+```
+```{r}
+#Heatmap of log transformed normalized counts using the top 10 genes(most significantly expressed)
+#top 10 genes
+top_hits <- deseq_result[order(deseq_result$padj), ][1:10,]
+top_hits <- row.names(top_hits)
+top_hits
+```
+
+```{r}
+rld <- rlog(dds,blind=FALSE)
+pheatmap(assay(rld)[top_hits,],)
+
+```
+```{r}
+#Heatmap of Z scores using the top 10 genes
+cal_z_score <- function(x) {(x-mean(x)) / sd(x)}
+zscore_all <- t(apply(normalize_counts, 1, cal_z_score))
+zscore_subset <- zscore_all[top_hits,]
+pheatmap(zscore_subset)
+```
+```{r}
+#MA Plot
+plotMA(dds,ylim=c(-2,2))
+
+```
+```{r}
+#remove the noise (shrinkage)
+resLFC <- lfcShrink(dds, coef="Treatment_treated_vs_untreated", type="apeglm")
+```
+
+
+```{r}
+plotMA(resLFC,ylim=c(-2,2))
+```
+
+```{r}
+#Volcano Plot
+resLFC <- as.data.frame(resLFC)
+
+#label the genes
+resLFC$diffexpressed <- "NO"
+resLFC$diffexpressed[resLFC$log2FoldChange>0.1 & resLFC$padj <0.05] <- "UP"
+resLFC$diffexpressed[resLFC$log2FoldChange<0.1 & resLFC$padj <0.05] <- "DOWN"
+resLFC$delabel <- NA
+ggplot(data=resLFC,aes(x=log2FoldChange, y=-log10(pvalue), col=diffexpressed,label=delabel))+
+  geom_point()+
+  theme_minimal()+
+  geom_text_repel()+
+  scale_colour_manual(values=c('blue','black','red'))+
+  theme(text=element_text(size=20))
+```
+
+
+
+```{r}
+devtools::install_github('kevinblighe/EnhancedVolcano')
+```
+
+
+```{r}
+library(EnhancedVolcano)
+EnchancedVolcano(resLFC, x='log2FoldChange', y=' padj', lab=rownames(resLFC))
+```
+
